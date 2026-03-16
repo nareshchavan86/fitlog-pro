@@ -240,20 +240,62 @@ document.getElementById("backBtn").addEventListener("click",function(){goNav("wo
 document.getElementById("navW").addEventListener("click",function(){goNav("workout")});
 document.getElementById("navH").addEventListener("click",function(){goNav("history")});
 
-// ===== API CALL TO GOOGLE SHEETS =====
+
+// ==============================================
+// ===== FIXED API CALL USING JSONP METHOD =====
+// ==============================================
+// Google Apps Script blocks normal fetch() CORS
+// This method uses script injection which works!
+
+var callbackCounter = 0;
+
 function callAPI(action, payload) {
-  return fetch(API, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action: action, payload: payload || {} }),
-    redirect: 'follow'
-  })
-  .then(function(response) {
-    // Google Apps Script redirects, need to follow
-    return response.json();
+  return new Promise(function(resolve, reject) {
+    var callbackName = 'fitlog_cb_' + (++callbackCounter) + '_' + Date.now();
+    var timeout;
+
+    // Create global callback function
+    window[callbackName] = function(response) {
+      clearTimeout(timeout);
+      cleanup();
+      resolve(response);
+    };
+
+    function cleanup() {
+      try {
+        delete window[callbackName];
+        var script = document.getElementById(callbackName);
+        if (script) script.remove();
+      } catch(e) {}
+    }
+
+    // Build URL with data as query parameter
+    var data = JSON.stringify({ action: action, payload: payload || {} });
+    var url = API + '?callback=' + callbackName + '&data=' + encodeURIComponent(data);
+
+    // Create script tag (bypasses CORS)
+    var script = document.createElement('script');
+    script.id = callbackName;
+    script.src = url;
+
+    script.onerror = function() {
+      clearTimeout(timeout);
+      cleanup();
+      reject(new Error('Network error'));
+    };
+
+    // Timeout after 30 seconds
+    timeout = setTimeout(function() {
+      cleanup();
+      reject(new Error('Request timed out'));
+    }, 30000);
+
+    document.body.appendChild(script);
   });
 }
 
+
+// ===== PING =====
 function ping() {
   var bar = document.getElementById("statusBar");
   bar.className = "status-bar show wait";
@@ -261,21 +303,27 @@ function ping() {
 
   if (API.indexOf('PASTE_YOUR') !== -1) {
     bar.className = "status-bar show err";
-    bar.textContent = "⚠️ Set your Google Apps Script URL!";
+    bar.textContent = "⚠️ Set your Google Apps Script URL in the code!";
     return;
   }
 
-  callAPI('ping').then(function(r) {
-    if (r.success) {
-      bar.className = "status-bar show ok";
-      bar.textContent = "✅ Connected to Google Sheets";
-      setTimeout(function(){ bar.className = "status-bar"; }, 3000);
-    }
-  }).catch(function(e) {
-    bar.className = "status-bar show err";
-    bar.textContent = "❌ Connection failed - check URL";
-  });
+  callAPI('ping')
+    .then(function(r) {
+      if (r && r.success) {
+        bar.className = "status-bar show ok";
+        bar.textContent = "✅ Connected to Google Sheets";
+        setTimeout(function(){ bar.className = "status-bar"; }, 3000);
+      } else {
+        bar.className = "status-bar show err";
+        bar.textContent = "❌ API error: " + (r ? r.message : 'Unknown');
+      }
+    })
+    .catch(function(e) {
+      bar.className = "status-bar show err";
+      bar.textContent = "❌ " + e.message;
+    });
 }
+
 
 // NAV
 function goNav(v) {
@@ -451,7 +499,7 @@ function collectData() {
   };
 }
 
-// SUBMIT TO GOOGLE SHEETS
+// ===== SUBMIT TO GOOGLE SHEETS =====
 function submit() {
   if (!document.getElementById("workoutDate").value) { toast("Select a date", true); return; }
   if (!sel) { toast("Select a muscle group", true); return; }
@@ -469,25 +517,21 @@ function submit() {
   showV("loading");
 
   var data = collectData();
-
-  // Save locally as backup
   saveLocal(data);
 
-  // Send to Google Sheets via Apps Script
   callAPI('submitWorkout', data)
     .then(function(result) {
-      if (result.success) {
+      if (result && result.success) {
         document.getElementById("successMsg").textContent =
           result.message + " Saved to Google Sheets! 📊💪";
         showV("success");
       } else {
-        toast(result.message, true);
+        toast(result ? result.message : 'Unknown error', true);
         showV("workout");
         btn.disabled = false; btn.textContent = "🚀 LOG WORKOUT";
       }
     })
     .catch(function(err) {
-      // Offline - saved locally
       document.getElementById("successMsg").textContent =
         "Saved offline! Will sync when connected. 📱";
       showV("success");
@@ -517,19 +561,19 @@ function reset() {
   toast("Ready for new workout! 💪");
 }
 
-// HISTORY FROM GOOGLE SHEETS
+// ===== HISTORY FROM GOOGLE SHEETS =====
 function loadHistory() {
   var c = document.getElementById("histContent");
   c.innerHTML = '<div class="loading-screen"><div class="spinner"></div><p>Loading from Google Sheets...</p></div>';
 
   callAPI('getHistory')
     .then(function(result) {
-      if (result.success) {
+      if (result && result.success) {
         renderHistory(result.data);
       } else {
         var local = getLocal();
         if (local.length > 0) { renderHistory(local); toast("Showing offline data"); }
-        else c.innerHTML = '<div class="hempty"><div class="hempty-icon">😕</div><h3>Error</h3><p>' + result.message + '</p></div>';
+        else c.innerHTML = '<div class="hempty"><div class="hempty-icon">😕</div><h3>Error</h3><p>' + (result ? result.message : 'Unknown') + '</p></div>';
       }
     })
     .catch(function(err) {
@@ -557,7 +601,7 @@ function renderHistory(data) {
   c.innerHTML = h;
 }
 
-// LOCAL STORAGE BACKUP
+// LOCAL STORAGE
 function saveLocal(d) {
   try {
     var h = JSON.parse(localStorage.getItem('fl')||'[]');
